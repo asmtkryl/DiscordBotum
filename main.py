@@ -20,5 +20,5 @@ async def on_ready():
         if filename.endswith('.py') and filename != '__init__.py':
             await bot.load_extension(f'cogs.{filename[:-3]}')
             print(f'{filename} yüklendi.')
-
+keep_alive()
 bot.run(os.getenv('DISCORD_TOKEN'))
