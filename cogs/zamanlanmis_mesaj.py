@@ -113,29 +113,51 @@ class ZamanlanmisMesaj(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(name="sabit-kur")
-    async def sabit_kur(self, ctx, saat: str, *, mesaj: str):
-        if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', saat):
-            await ctx.send("❌ Saat formatı hatalı! Örn: `18:00`")
+    async def sabit_kur(self, ctx, *args):
+        """
+        Kullanım: 
+        1. !sabit-kur 18:00 Mesajınız (Yazılan kanala kurar)
+        2. !sabit-kur #kanal 18:00 Mesajınız (Etiketlenen kanala kurar)
+        """
+        if not args:
+            await ctx.send("❌ Kullanım: `!sabit-kur #kanal 18:00 Mesaj` veya `!sabit-kur 18:00 Mesaj`")
             return
+
+        target_channel = ctx.channel
+        saat = None
+        mesaj_parts = []
+
+        # Argümanları tara (Kanal etiketi var mı bak)
+        for arg in args:
+            # Kanal etiketini kontrol et
+            if arg.startswith('<#') and arg.endswith('>'):
+                try:
+                    converter = commands.TextChannelConverter()
+                    target_channel = await converter.convert(ctx, arg)
+                    continue
+                except: pass
+            
+            # Saat formatını kontrol et (18:00 gibi)
+            if re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', arg):
+                saat = arg
+                continue
+            
+            # Geri kalan her şey mesajın parçasıdır
+            mesaj_parts.append(arg)
+
+        mesaj = " ".join(mesaj_parts)
+
+        if not saat or not mesaj:
+            await ctx.send("⚠️ Hata: Saat (18:00) veya mesaj içeriği bulunamadı.")
+            return
+
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        c.execute("INSERT INTO sabit_mesajlar VALUES (?, ?, ?)", (ctx.channel.id, saat, mesaj))
+        c.execute("INSERT INTO sabit_mesajlar VALUES (?, ?, ?)", (target_channel.id, saat, mesaj))
         conn.commit()
         conn.close()
-        await ctx.send(f"✅ Her gün **{saat}** saatinde bu kanala mesaj atılacak.")
 
-    @commands.command(name="sabit-liste")
-    async def sabit_liste(self, ctx):
-        conn = sqlite3.connect(self.db_name)
-        c = conn.cursor()
-        c.execute("SELECT saat, content FROM sabit_mesajlar WHERE channel_id = ?", (ctx.channel.id,))
-        rows = c.fetchall()
-        conn.close()
-        if not rows:
-            await ctx.send("📭 Bu kanalda kayıtlı sabit saatli mesaj yok.")
-            return
-        liste = "\n".join([f"⏰ **{r[0]}** - {r[1][:30]}..." for r in rows])
-        await ctx.send(f"📋 **Sabit Saatli Mesajlar:**\n{liste}")
+        await ctx.send(f"✅ Her gün **{saat}** saatinde {target_channel.mention} kanalına mesaj atılacak.")
 
     @tasks.loop(seconds=20)
     async def zamanlayici_kontrol(self):
