@@ -2,9 +2,8 @@ import discord
 from discord.ext import commands, tasks
 import sqlite3
 import datetime
-import re
 import asyncio
-import os
+import re
 
 class ZamanlanmisMesaj(commands.Cog):
     def __init__(self, bot):
@@ -17,12 +16,12 @@ class ZamanlanmisMesaj(commands.Cog):
     def setup_db(self):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        # 1. Tablo: Aralıklı mesajlar
-        c.execute('''CREATE TABLE IF NOT EXISTS mesajlar
-                     (channel_id INTEGER, interval INTEGER, next_run REAL, content TEXT)''')
-        # 2. Tablo: Sabit saatli mesajlar
+        # Periyotlu mesajlar tablosu
+        c.execute('''CREATE TABLE IF NOT EXISTS periyotlu_mesajlar
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, start_time TEXT, interval INTEGER, next_run REAL, content TEXT)''')
+        # Sabit saatli mesajlar tablosu
         c.execute('''CREATE TABLE IF NOT EXISTS sabit_mesajlar
-                     (channel_id INTEGER, saat TEXT, content TEXT)''')
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, saat TEXT, content TEXT)''')
         conn.commit()
         conn.close()
 
@@ -30,150 +29,117 @@ class ZamanlanmisMesaj(commands.Cog):
         self.zamanlayici_kontrol.cancel()
         self.sabit_saat_kontrol.cancel()
 
-    async def akilli_ayristir(self, ctx, args):
-        channel = ctx.channel 
-        interval = None
-        start_time_obj = None
-        message_parts = []
-        used_indices = []
-
-        for i, arg in enumerate(args):
-            if i in used_indices: continue
+    async def uclu_mesaj_gonder(self, channel, content):
+        """Mesajı 3 kere gönderir ve 10 dakika sonra siler."""
+        for _ in range(3):
             try:
-                converter = commands.TextChannelConverter()
-                found_channel = await converter.convert(ctx, arg)
-                channel = found_channel
-                used_indices.append(i)
-            except: pass
+                await channel.send(content, delete_after=600) # 600 saniye = 10 dakika
+                await asyncio.sleep(2) # Mesajlar arasında çok kısa bekleme (opsiyonel)
+            except Exception as e:
+                print(f"Mesaj gönderme hatası: {e}")
 
-        for i, arg in enumerate(args):
-            if i in used_indices: continue
-            clean_arg = arg.replace('(', '').replace(')', '')
-            if re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', clean_arg):
-                now = datetime.datetime.now()
-                hour, minute = map(int, clean_arg.split(':'))
-                start_time_obj = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                used_indices.append(i)
-                break
-
-        for i, arg in enumerate(args):
-            if i in used_indices: continue
-            if arg.isdigit() and interval is None:
-                interval = int(arg)
-                used_indices.append(i)
-                break
-        
-        for i, arg in enumerate(args):
-            if i not in used_indices:
-                message_parts.append(arg)
-        
-        full_message = " ".join(message_parts)
-        return channel, interval, start_time_obj, full_message
+    # --- KOMUTLAR ---
 
     @commands.command(name="mesaj-baslat")
-    async def mesaj_baslat(self, ctx, *args):
-        channel, interval, start_time, content = await self.akilli_ayristir(ctx, args)
-        if interval is None or not content:
-            await ctx.send("❌ Hata! Örn: `!mesaj-baslat #kanal 30 Mesaj`")
-            return
+    async def mesaj_baslat(self, ctx, kanal: discord.TextChannel, baslangic_saati: str, aralik: int, *, mesaj: str):
+        """!mesaj-baslat #kanal 14:30 60 Merhaba Dünya"""
+        try:
+            now = datetime.datetime.now()
+            hour, minute = map(int, baslangic_saati.split(':'))
+            start_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            if start_dt < now:
+                start_dt += datetime.timedelta(days=1)
 
-        now = datetime.datetime.now()
-        next_run = start_time if start_time and start_time > now else now
-        
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            c.execute("INSERT INTO periyotlu_mesajlar (channel_id, start_time, interval, next_run, content) VALUES (?, ?, ?, ?, ?)",
+                      (kanal.id, baslangic_saati, aralik, start_dt.timestamp(), mesaj))
+            conn.commit()
+            conn.close()
+            await ctx.send(f"✅ Periyotlu mesaj kuruldu: {kanal.mention} | Başlangıç: {baslangic_saati} | Aralık: {aralik}dk")
+        except Exception as e:
+            await ctx.send(f"❌ Hata: Parametreleri kontrol edin. Örn: `!mesaj-baslat #kanal 14:30 60 Mesaj`")
+
+    @commands.command(name="sabit-mesaj")
+    async def sabit_mesaj(self, ctx, kanal: discord.TextChannel, saat: str, *, mesaj: str):
+        """!sabit-mesaj #kanal 18:00 Bu bir sabit mesajdır"""
+        if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', saat):
+            return await ctx.send("❌ Geçersiz saat formatı! (Örn: 18:00)")
+
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        c.execute("DELETE FROM mesajlar WHERE channel_id = ?", (channel.id,))
-        c.execute("INSERT INTO mesajlar VALUES (?, ?, ?, ?)", (channel.id, interval, next_run.timestamp(), content))
+        c.execute("INSERT INTO sabit_mesajlar (channel_id, saat, content) VALUES (?, ?, ?)", (kanal.id, saat, mesaj))
         conn.commit()
         conn.close()
-        await ctx.send(f"✅ Döngü kuruldu: {channel.mention} | ⏱️ {interval}dk")
+        await ctx.send(f"✅ Sabit mesaj kuruldu: {kanal.mention} kanalına her gün saat **{saat}**'de 3 kez atılacak.")
 
-    # --- BURASI DÜZELTİLDİ: MESAJ LİSTELEME ---
-    @commands.command(name="mesaj-listele")
-    async def mesaj_listele(self, ctx):
+    @commands.command(name="sabit-listele")
+    async def sabit_listele(self, ctx):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        c.execute("SELECT channel_id, interval, next_run, content FROM mesajlar")
+        c.execute("SELECT id, channel_id, saat, content FROM sabit_mesajlar")
         rows = c.fetchall()
         conn.close()
 
-        if not rows:
-            await ctx.send("📭 Şu an aktif hiçbir aralıklı mesaj döngüsü yok.")
-            return
-
-        embed = discord.Embed(title="📋 Aktif Mesaj Döngüleri", color=discord.Color.blue())
+        if not rows: return await ctx.send("📭 Sabit mesaj yok.")
+        
+        embed = discord.Embed(title="📌 Sabit Mesaj Listesi", color=discord.Color.green())
         for row in rows:
-            chan_id, interval, next_ts, content = row
-            next_run_dt = datetime.datetime.fromtimestamp(next_ts).strftime('%H:%M')
-            embed.add_field(
-                name=f"Kanal: #{self.bot.get_channel(chan_id) or chan_id}",
-                value=f"**Aralık:** {interval}dk\n**Sıradaki:** {next_run_dt}\n**Mesaj:** {content[:30]}...",
-                inline=False
-            )
+            embed.add_field(name=f"ID: {row[0]} | Saat: {row[2]}", value=f"Kanal: <#{row[1]}>\nMesaj: {row[3][:50]}", inline=False)
         await ctx.send(embed=embed)
 
-    @commands.command(name="sabit-kur")
-    async def sabit_kur(self, ctx, *args):
-        """
-        Kullanım: 
-        1. !sabit-kur 18:00 Mesajınız (Yazılan kanala kurar)
-        2. !sabit-kur #kanal 18:00 Mesajınız (Etiketlenen kanala kurar)
-        """
-        if not args:
-            await ctx.send("❌ Kullanım: `!sabit-kur #kanal 18:00 Mesaj` veya `!sabit-kur 18:00 Mesaj`")
-            return
-
-        target_channel = ctx.channel
-        saat = None
-        mesaj_parts = []
-
-        # Argümanları tara (Kanal etiketi var mı bak)
-        for arg in args:
-            # Kanal etiketini kontrol et
-            if arg.startswith('<#') and arg.endswith('>'):
-                try:
-                    converter = commands.TextChannelConverter()
-                    target_channel = await converter.convert(ctx, arg)
-                    continue
-                except: pass
-            
-            # Saat formatını kontrol et (18:00 gibi)
-            if re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', arg):
-                saat = arg
-                continue
-            
-            # Geri kalan her şey mesajın parçasıdır
-            mesaj_parts.append(arg)
-
-        mesaj = " ".join(mesaj_parts)
-
-        if not saat or not mesaj:
-            await ctx.send("⚠️ Hata: Saat (18:00) veya mesaj içeriği bulunamadı.")
-            return
-
+    @commands.command(name="mesaj-liste")
+    async def mesaj_liste(self, ctx):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        c.execute("INSERT INTO sabit_mesajlar VALUES (?, ?, ?)", (target_channel.id, saat, mesaj))
-        conn.commit()
+        c.execute("SELECT id, channel_id, interval, content FROM periyotlu_mesajlar")
+        rows = c.fetchall()
         conn.close()
 
-        await ctx.send(f"✅ Her gün **{saat}** saatinde {target_channel.mention} kanalına mesaj atılacak.")
+        if not rows: return await ctx.send("📭 Periyotlu mesaj yok.")
 
-    @tasks.loop(seconds=20)
-    async def zamanlayici_kontrol(self):
+        embed = discord.Embed(title="⏳ Periyotlu Mesaj Listesi", color=discord.Color.orange())
+        for row in rows:
+            embed.add_field(name=f"ID: {row[0]} | Aralık: {row[2]}dk", value=f"Kanal: <#{row[1]}>\nMesaj: {row[3][:50]}", inline=False)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="sabit-sil")
+    async def sabit_sil(self, ctx, id: int):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
+        c.execute("DELETE FROM sabit_mesajlar WHERE id = ?", (id,))
+        conn.commit()
+        conn.close()
+        await ctx.send(f"✅ {id} numaralı sabit mesaj silindi.")
+
+    @commands.command(name="mesaj-sil")
+    async def mesaj_sil(self, ctx, id: int):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("DELETE FROM periyotlu_mesajlar WHERE id = ?", (id,))
+        conn.commit()
+        conn.close()
+        await ctx.send(f"✅ {id} numaralı periyotlu mesaj silindi.")
+
+    # --- DÖNGÜLER ---
+
+    @tasks.loop(seconds=30)
+    async def zamanlayici_kontrol(self):
         now_ts = datetime.datetime.now().timestamp()
-        c.execute("SELECT rowid, channel_id, interval, content FROM mesajlar WHERE next_run <= ?", (now_ts,))
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("SELECT id, channel_id, interval, content FROM periyotlu_mesajlar WHERE next_run <= ?", (now_ts,))
+        
         for row in c.fetchall():
-            row_id, chan_id, interval, content = row
-            channel = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
+            msg_id, chan_id, interval, content = row
+            channel = self.bot.get_channel(chan_id)
             if channel:
-                try:
-                    await channel.send(content, delete_after=600)
-                except: pass
-            next_run_new = datetime.datetime.now().timestamp() + (interval * 60)
-            c.execute("UPDATE mesajlar SET next_run = ? WHERE rowid = ?", (next_run_new, row_id))
+                await self.uclu_mesaj_gonder(channel, content)
+            
+            new_next_run = datetime.datetime.now().timestamp() + (interval * 60)
+            c.execute("UPDATE periyotlu_mesajlar SET next_run = ? WHERE id = ?", (new_next_run, msg_id))
+        
         conn.commit()
         conn.close()
 
@@ -183,13 +149,13 @@ class ZamanlanmisMesaj(commands.Cog):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
         c.execute("SELECT channel_id, content FROM sabit_mesajlar WHERE saat = ?", (simdi,))
+        
         for row in c.fetchall():
             chan_id, content = row
-            channel = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
+            channel = self.bot.get_channel(chan_id)
             if channel:
-                try:
-                    await channel.send(content, delete_after=600)
-                except: pass
+                await self.uclu_mesaj_gonder(channel, content)
+        
         conn.close()
 
     @zamanlayici_kontrol.before_loop
