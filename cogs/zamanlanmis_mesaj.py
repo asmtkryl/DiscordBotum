@@ -14,26 +14,46 @@ class ZamanlanmisMesaj(commands.Cog):
         self.sabit_saat_kontrol.start()
 
     def tr_saati_getir(self):
-        """Render gibi sunucularda saati her zaman Türkiye saati (UTC+3) olarak döndürür."""
+        """Türkiye saatini (UTC+3) döndürür."""
         return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
 
     def setup_db(self):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
+        # guild_id eklendi: Sunucuların verileri ayrıştırıldı
         c.execute('''CREATE TABLE IF NOT EXISTS periyotlu_mesajlar
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, interval INTEGER, next_run REAL, content TEXT)''')
+                     (id INTEGER PRIMARY KEY, guild_id INTEGER, channel_id INTEGER, interval INTEGER, next_run REAL, content TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS sabit_mesajlar
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, saat TEXT, content TEXT)''')
+                     (id INTEGER PRIMARY KEY, guild_id INTEGER, channel_id INTEGER, saat TEXT, content TEXT)''')
         conn.commit()
         conn.close()
 
+    def bos_id_bul(self, tablo_adi):
+        """Silinen ID'lerin yerini doldurmak için en küçük boş ID'yi bulur."""
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute(f"SELECT id FROM {tablo_adi} ORDER BY id ASC")
+        mevcut_id_ler = [row[0] for row in c.fetchall()]
+        conn.close()
+        
+        yeni_id = 1
+        for m_id in mevcut_id_ler:
+            if m_id == yeni_id:
+                yeni_id += 1
+            else:
+                break
+        return yeni_id
+
     async def uclu_mesaj_gonder(self, channel, content):
+        """3 kez mesaj atar ve her birini 10 dakika (600sn) sonra siler."""
         for _ in range(3):
             try:
                 await channel.send(content, delete_after=600)
                 await asyncio.sleep(2) 
-            except Exception as e:
-                print(f"Gönderim hatası: {e}")
+            except:
+                pass
+
+    # --- KOMUTLAR ---
 
     @commands.command(name="mesaj-baslat")
     async def mesaj_baslat(self, ctx, kanal: discord.TextChannel, baslangic_saati: str, aralik: int, *, mesaj: str):
@@ -45,27 +65,91 @@ class ZamanlanmisMesaj(commands.Cog):
             if start_dt < tr_now:
                 start_dt += datetime.timedelta(days=1)
 
+            yeni_id = self.bos_id_bul("periyotlu_mesajlar")
+            
             conn = sqlite3.connect(self.db_name)
             c = conn.cursor()
-            c.execute("INSERT INTO periyotlu_mesajlar (channel_id, interval, next_run, content) VALUES (?, ?, ?, ?)",
-                      (kanal.id, aralik, start_dt.timestamp(), mesaj))
+            c.execute("INSERT INTO periyotlu_mesajlar (id, guild_id, channel_id, interval, next_run, content) VALUES (?, ?, ?, ?, ?, ?)",
+                      (yeni_id, ctx.guild.id, kanal.id, aralik, start_dt.timestamp(), mesaj))
             conn.commit()
             conn.close()
-            await ctx.send(f"✅ Periyotlu mesaj kuruldu: {kanal.mention} | Başlangıç TR: {baslangic_saati} | {aralik}dk")
+            await ctx.send(f"✅ Periyotlu mesaj kuruldu! **ID: {yeni_id}** | Kanal: {kanal.mention} | Aralık: {aralik}dk")
         except:
             await ctx.send("❌ Hata! Format: `!mesaj-baslat #kanal 14:30 60 Mesaj`")
 
     @commands.command(name="sabit-mesaj")
     async def sabit_mesaj(self, ctx, kanal: discord.TextChannel, saat: str, *, mesaj: str):
         if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', saat):
-            return await ctx.send("❌ Saat formatı hatalı (18:00 gibi yazın).")
+            return await ctx.send("❌ Hata: Saat formatı 18:00 gibi olmalı.")
+
+        yeni_id = self.bos_id_bul("sabit_mesajlar")
 
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        c.execute("INSERT INTO sabit_mesajlar (channel_id, saat, content) VALUES (?, ?, ?)", (kanal.id, saat, mesaj))
+        c.execute("INSERT INTO sabit_mesajlar (id, guild_id, channel_id, saat, content) VALUES (?, ?, ?, ?, ?)", 
+                  (yeni_id, ctx.guild.id, kanal.id, saat, mesaj))
         conn.commit()
         conn.close()
-        await ctx.send(f"✅ Her gün TR saatiyle **{saat}**'de 3 mesaj atılacak.")
+        await ctx.send(f"✅ Sabit mesaj kuruldu! **ID: {yeni_id}** | Kanal: {kanal.mention} | Saat: {saat}")
+
+    @commands.command(name="sabit-listele")
+    async def sabit_listele(self, ctx):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        # Sadece bu sunucuya (guild_id) ait mesajları getir
+        c.execute("SELECT id, channel_id, saat, content FROM sabit_mesajlar WHERE guild_id = ? ORDER BY id ASC", (ctx.guild.id,))
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows: return await ctx.send("📭 Bu sunucu için sabit mesaj yok.")
+        
+        embed = discord.Embed(title="📌 Sunucu Sabit Mesajları", color=discord.Color.blue())
+        for r in rows:
+            embed.add_field(name=f"ID: {r[0]} | Saat: {r[2]}", value=f"Kanal: <#{r[1]}>\nMesaj: {r[3][:50]}", inline=False)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="mesaj-liste")
+    async def mesaj_liste(self, ctx):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        # Sadece bu sunucuya (guild_id) ait mesajları getir
+        c.execute("SELECT id, channel_id, interval, content FROM periyotlu_mesajlar WHERE guild_id = ? ORDER BY id ASC", (ctx.guild.id,))
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows: return await ctx.send("📭 Bu sunucu için periyotlu mesaj yok.")
+        
+        embed = discord.Embed(title="⏳ Sunucu Periyotlu Mesajları", color=discord.Color.gold())
+        for r in rows:
+            embed.add_field(name=f"ID: {r[0]} | Aralık: {r[2]}dk", value=f"Kanal: <#{r[1]}>\nMesaj: {r[3][:50]}", inline=False)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="sabit-sil")
+    async def sabit_sil(self, ctx, id: int):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        # Sadece bu sunucuya ait ID'yi sil (Güvenlik için guild_id kontrolü)
+        c.execute("DELETE FROM sabit_mesajlar WHERE id = ? AND guild_id = ?", (id, ctx.guild.id))
+        if conn.total_changes > 0:
+            await ctx.send(f"✅ ID: {id} olan sabit mesaj silindi.")
+        else:
+            await ctx.send(f"❌ ID: {id} bulunamadı veya bu sunucuya ait değil.")
+        conn.commit()
+        conn.close()
+
+    @commands.command(name="mesaj-sil")
+    async def mesaj_sil(self, ctx, id: int):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("DELETE FROM periyotlu_mesajlar WHERE id = ? AND guild_id = ?", (id, ctx.guild.id))
+        if conn.total_changes > 0:
+            await ctx.send(f"✅ ID: {id} olan periyotlu mesaj silindi.")
+        else:
+            await ctx.send(f"❌ ID: {id} bulunamadı veya bu sunucuya ait değil.")
+        conn.commit()
+        conn.close()
+
+    # --- DÖNGÜLER ---
 
     @tasks.loop(seconds=30)
     async def zamanlayici_kontrol(self):
@@ -99,48 +183,6 @@ class ZamanlanmisMesaj(commands.Cog):
             if channel:
                 await self.uclu_mesaj_gonder(channel, content)
         conn.close()
-
-    @commands.command(name="sabit-listele")
-    async def sabit_listele(self, ctx):
-        conn = sqlite3.connect(self.db_name)
-        c = conn.cursor()
-        c.execute("SELECT id, channel_id, saat, content FROM sabit_mesajlar")
-        rows = c.fetchall()
-        conn.close()
-        if not rows: return await ctx.send("📭 Liste boş.")
-        embed = discord.Embed(title="📌 Sabit Mesajlar (TR Saati)", color=0x2ecc71)
-        for r in rows: embed.add_field(name=f"ID: {r[0]} | {r[2]}", value=f"<#{r[1]}>: {r[3][:30]}...", inline=False)
-        await ctx.send(embed=embed)
-
-    @commands.command(name="mesaj-liste")
-    async def mesaj_liste(self, ctx):
-        conn = sqlite3.connect(self.db_name)
-        c = conn.cursor()
-        c.execute("SELECT id, channel_id, interval, content FROM periyotlu_mesajlar")
-        rows = c.fetchall()
-        conn.close()
-        if not rows: return await ctx.send("📭 Liste boş.")
-        embed = discord.Embed(title="⏳ Periyotlu Mesajlar", color=0xe67e22)
-        for r in rows: embed.add_field(name=f"ID: {r[0]} | {r[2]}dk", value=f"<#{r[1]}>: {r[3][:30]}...", inline=False)
-        await ctx.send(embed=embed)
-
-    @commands.command(name="sabit-sil")
-    async def sabit_sil(self, ctx, id: int):
-        conn = sqlite3.connect(self.db_name)
-        c = conn.cursor()
-        c.execute("DELETE FROM sabit_mesajlar WHERE id = ?", (id,))
-        conn.commit()
-        conn.close()
-        await ctx.send(f"✅ Sabit mesaj silindi.")
-
-    @commands.command(name="mesaj-sil")
-    async def mesaj_sil(self, ctx, id: int):
-        conn = sqlite3.connect(self.db_name)
-        c = conn.cursor()
-        c.execute("DELETE FROM periyotlu_mesajlar WHERE id = ?", (id,))
-        conn.commit()
-        conn.close()
-        await ctx.send(f"✅ Periyotlu mesaj silindi.")
 
     @zamanlayici_kontrol.before_loop
     @sabit_saat_kontrol.before_loop
